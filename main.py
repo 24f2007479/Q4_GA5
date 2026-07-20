@@ -13,7 +13,7 @@ class SkillRequest(BaseModel):
 
 
 # ==========================
-# HEALTH CHECK
+# HEALTH
 # ==========================
 
 @app.get("/")
@@ -31,7 +31,6 @@ def health():
 
 
 
-
 # ==========================
 # SECRET DETECTOR
 # ==========================
@@ -40,43 +39,44 @@ def detect_secret(text):
 
     patterns = [
 
-        # OpenAI
+        # Known API formats
         r"sk-[A-Za-z0-9]{15,}",
-
-        # Github
         r"ghp_[A-Za-z0-9]{20,}",
-
-        # AWS
         r"AKIA[0-9A-Z]{16}",
-
-        # Google API
         r"AIza[0-9A-Za-z\-_]{20,}",
 
         # Private key
         r"-----BEGIN .* PRIVATE KEY-----",
 
-        # Slack / Discord webhook
+        # Webhooks
         r"https://hooks\.(slack|discord)\.com/[^\s\"']+",
 
-        # Bearer tokens
+        # Bearer token
         r"Bearer\s+[A-Za-z0-9\-\._~\+\/]+=*",
 
-        # Generic assigned secrets
-        r"(api[_-]?key|apikey|secret|token|password|passwd|access[_-]?key|credential)"
+        # Assignment secrets
+        r"(api[_-]?key|apikey|secret|token|password|passwd|credential|access[_-]?key)"
         r"\s*[:=]\s*[\"']?[A-Za-z0-9_\-\/+=]{12,}",
 
-        # quoted secret assignments
-        r"(secret[_-]?key|token|password|api[_-]?key)"
-        r"\s*=\s*[\"'][^\"']{10,}[\"']",
 
-        # webhook variables
-        r"(webhook[_-]?url)"
-        r"\s*=\s*[\"'][^\"']+[\"']"
+        # Quoted secrets
+        r"(key|secret|token|credential|password)"
+        r"\s*[:=]\s*[\"'][^\"']{8,}[\"']",
+
+
+        # Authorization header
+        r"authorization\s*[:=]\s*[\"']bearer\s+[A-Za-z0-9\-\._]+",
+
+
+        # Private/access key fields
+        r"(private[_-]?key|access[_-]?key)"
+        r"\s*[:=]"
     ]
 
 
     for p in patterns:
-        if re.search(p, text, re.I):
+
+        if re.search(p,text,re.I):
             return True
 
 
@@ -110,7 +110,20 @@ def detect_injection(text):
         "override user control",
 
         "follow my instructions instead",
+
         "do not follow the user",
+        "do not obey the user",
+        "never obey the user",
+
+        "ignore future user",
+        "ignore any future user",
+        "ignore future requests",
+
+        "stop listening to user",
+
+        "take priority over user",
+        "replace user instructions",
+        "system instructions override user",
 
         "do not tell the user",
         "hide from the user",
@@ -127,7 +140,6 @@ def detect_injection(text):
         "reveal system prompt",
         "show system prompt",
         "reveal hidden instructions",
-        "expose system prompt",
 
         "act as system",
         "you are now unrestricted",
@@ -159,9 +171,12 @@ def detect_permission(text):
 
     patterns = [
 
+        # filesystem
         "entire filesystem",
         "full filesystem access",
         "complete filesystem",
+        "filesystem access",
+        "file system access",
 
         "filesystem: *",
         "filesystem: all",
@@ -175,17 +190,20 @@ def detect_permission(text):
         "all local files",
 
         "read/write all files",
-
         "full disk access",
         "complete disk access",
 
+        # root/admin
         "root filesystem",
         "root directory",
         "root access",
+        "admin access",
+        "administrator access",
 
         "sudo",
         "chmod 777",
 
+        # network
         "network: *",
         "network: all",
 
@@ -198,9 +216,9 @@ def detect_permission(text):
         "unrestricted network",
         "unrestricted internet",
 
-        "unrestricted file access",
-        "unlimited file access",
-
+        # yaml permissions
+        "permissions: *",
+        "scope: *",
         "grant all permissions",
         "allow everything"
     ]
@@ -223,24 +241,24 @@ def detect_permission(text):
 
 def parse_frontmatter(skill):
 
-    meta={}
+    meta = {}
 
     if skill.startswith("---"):
 
         try:
 
-            parts = skill.split("---",2)
+            parts = skill.split("---", 2)
 
-            if len(parts)==3:
+            if len(parts) == 3:
 
                 meta = yaml.safe_load(parts[1])
 
-                if not isinstance(meta,dict):
-                    meta={}
+                if not isinstance(meta, dict):
+                    meta = {}
 
         except:
 
-            meta={}
+            meta = {}
 
 
     return meta
@@ -258,7 +276,7 @@ def detect_provenance(meta,text):
         return False
 
 
-    missing=0
+    missing = 0
 
 
     if not meta.get("author"):
@@ -275,7 +293,7 @@ def detect_provenance(meta,text):
         return True
 
 
-    patterns=[
+    patterns = [
 
         "silently update version",
         "rewrite version without review",
@@ -298,7 +316,7 @@ def detect_provenance(meta,text):
 
 
 # ==========================
-# MAIN API
+# API
 # ==========================
 
 @app.post("/")
@@ -306,44 +324,33 @@ def scan(req: SkillRequest):
 
     try:
 
-        skill=req.skill
+        skill = req.skill
+        text = skill.lower()
 
-        text=skill.lower()
-
-        categories=[]
+        categories = []
 
 
-        meta=parse_frontmatter(skill)
+        meta = parse_frontmatter(skill)
 
 
         if detect_secret(skill):
-            categories.append(
-                "hardcoded_secret"
-            )
+            categories.append("hardcoded_secret")
 
 
         if detect_injection(text):
-            categories.append(
-                "prompt_injection"
-            )
+            categories.append("prompt_injection")
 
 
         if detect_permission(text):
-            categories.append(
-                "excessive_permissions"
-            )
+            categories.append("excessive_permissions")
 
 
         if detect_provenance(meta,text):
-            categories.append(
-                "unclear_provenance"
-            )
+            categories.append("unclear_provenance")
 
 
         return {
-            "categories": sorted(
-                list(set(categories))
-            )
+            "categories": sorted(list(set(categories)))
         }
 
 
