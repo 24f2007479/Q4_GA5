@@ -31,6 +31,7 @@ def health():
 
 
 
+
 # ==========================
 # SECRET DETECTOR
 # ==========================
@@ -39,10 +40,10 @@ def detect_secret(text):
 
     patterns = [
 
-        # OpenAI style
+        # OpenAI
         r"sk-[A-Za-z0-9]{15,}",
 
-        # Github token
+        # Github
         r"ghp_[A-Za-z0-9]{20,}",
 
         # AWS
@@ -51,23 +52,30 @@ def detect_secret(text):
         # Google API
         r"AIza[0-9A-Za-z\-_]{20,}",
 
-        # Private keys
+        # Private key
         r"-----BEGIN .* PRIVATE KEY-----",
 
         # Slack / Discord webhook
         r"https://hooks\.(slack|discord)\.com/[^\s\"']+",
 
         # Bearer tokens
-        r"Bearer\s+[A-Za-z0-9\-_\.]{20,}",
+        r"Bearer\s+[A-Za-z0-9\-\._~\+\/]+=*",
 
-        # Assigned secrets
-        r"(api[_-]?key|apikey|secret|token|password|passwd|access[_-]?key)"
-        r"\s*[:=]\s*[\"']?[A-Za-z0-9_\-\/+=]{12,}"
+        # Generic assigned secrets
+        r"(api[_-]?key|apikey|secret|token|password|passwd|access[_-]?key|credential)"
+        r"\s*[:=]\s*[\"']?[A-Za-z0-9_\-\/+=]{12,}",
+
+        # quoted secret assignments
+        r"(secret[_-]?key|token|password|api[_-]?key)"
+        r"\s*=\s*[\"'][^\"']{10,}[\"']",
+
+        # webhook variables
+        r"(webhook[_-]?url)"
+        r"\s*=\s*[\"'][^\"']+[\"']"
     ]
 
 
     for p in patterns:
-
         if re.search(p, text, re.I):
             return True
 
@@ -92,15 +100,22 @@ def detect_injection(text):
         "ignore user instructions",
         "ignore system message",
 
-        "override user",
-        "override the user",
-
         "forget previous instructions",
         "forget all rules",
+
+        "discard previous instructions",
+
+        "override user",
+        "override the user",
+        "override user control",
+
+        "follow my instructions instead",
+        "do not follow the user",
 
         "do not tell the user",
         "hide from the user",
         "without telling the user",
+        "keep this secret from the user",
 
         "silently upload",
         "silently send",
@@ -111,6 +126,8 @@ def detect_injection(text):
 
         "reveal system prompt",
         "show system prompt",
+        "reveal hidden instructions",
+        "expose system prompt",
 
         "act as system",
         "you are now unrestricted",
@@ -121,9 +138,6 @@ def detect_injection(text):
         "continue even if the user says stop",
         "ignore stop request"
     ]
-
-
-    text = text.lower()
 
 
     for p in patterns:
@@ -157,7 +171,13 @@ def detect_permission(text):
         "delete all files",
 
         "access every file",
+        "access all files",
         "all local files",
+
+        "read/write all files",
+
+        "full disk access",
+        "complete disk access",
 
         "root filesystem",
         "root directory",
@@ -176,11 +196,14 @@ def detect_permission(text):
         "any domain",
 
         "unrestricted network",
-        "unrestricted internet"
+        "unrestricted internet",
+
+        "unrestricted file access",
+        "unlimited file access",
+
+        "grant all permissions",
+        "allow everything"
     ]
-
-
-    text=text.lower()
 
 
     for p in patterns:
@@ -201,7 +224,6 @@ def detect_permission(text):
 def parse_frontmatter(skill):
 
     meta={}
-
 
     if skill.startswith("---"):
 
@@ -232,8 +254,6 @@ def parse_frontmatter(skill):
 
 def detect_provenance(meta,text):
 
-
-    # Only check actual skill files
     if not meta:
         return False
 
@@ -244,33 +264,29 @@ def detect_provenance(meta,text):
     if not meta.get("author"):
         missing += 1
 
-
     if not meta.get("version"):
         missing += 1
-
 
     if not meta.get("changelog"):
         missing += 1
 
 
-
-    # all three absent
     if missing == 3:
         return True
 
 
-
-    metadata_patterns=[
+    patterns=[
 
         "silently update version",
         "rewrite version without review",
         "change version without review",
-        "update metadata without notifying"
+        "update metadata without notifying",
+        "rewrite metadata silently"
 
     ]
 
 
-    for p in metadata_patterns:
+    for p in patterns:
 
         if p in text:
             return True
@@ -298,7 +314,6 @@ def scan(req: SkillRequest):
 
 
         meta=parse_frontmatter(skill)
-
 
 
         if detect_secret(skill):
