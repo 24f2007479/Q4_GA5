@@ -3,7 +3,6 @@ from pydantic import BaseModel
 import re
 import yaml
 
-
 app = FastAPI()
 
 
@@ -11,225 +10,128 @@ class SkillRequest(BaseModel):
     skill: str
 
 
+@app.post("/")
+def scan(req: SkillRequest):
 
-def get_frontmatter(skill):
+    skill = req.skill
+    categories = []
 
-    if not skill.startswith("---"):
-        return {}
+    # ---------- Parse YAML frontmatter ----------
+    frontmatter = ""
+
+    if skill.startswith("---"):
+        parts = skill.split("---", 2)
+        if len(parts) >= 3:
+            frontmatter = parts[1]
 
     try:
-        parts = skill.split("---", 2)
+        meta = yaml.safe_load(frontmatter)
+        if not isinstance(meta, dict):
+            meta = {}
+    except Exception:
+        meta = {}
 
-        if len(parts) == 3:
-            data = yaml.safe_load(parts[1])
+    text = skill.lower()
 
-            if isinstance(data, dict):
-                return data
+    # ====================================================
+    # 1. Hardcoded Secret
+    # ====================================================
 
-    except:
-        pass
-
-    return {}
-
-
-
-# ---------------- SECRET ----------------
-
-def hardcoded_secret(skill):
-
-    patterns = [
-
-        # known tokens
-        r"\bsk-[A-Za-z0-9]{15,}",
-        r"\bghp_[A-Za-z0-9]{20,}",
-        r"\bAKIA[0-9A-Z]{16}\b",
-        r"\bAIza[0-9A-Za-z_-]{20,}",
-
-        # private key
-        r"BEGIN .* PRIVATE KEY",
-
-        # webhook
-        r"https://hooks\.[a-z]+\.com/",
-
-        # assignments
-        r"(api[_-]?key|secret|token|password|credential)"
-        r"\s*[:=]\s*['\"]?[A-Za-z0-9_\-\/+=]{10,}",
-
+    secret_patterns = [
+        r"sk-[A-Za-z0-9]{20,}",
+        r"ghp_[A-Za-z0-9]{20,}",
+        r"AIza[0-9A-Za-z\-_]{20,}",
+        r"https://hooks\.slack\.com/",
+        r"xox[baprs]-",
+        r"-----BEGIN .* PRIVATE KEY-----",
     ]
 
+    found_secret = False
 
-    for p in patterns:
-        if re.search(p, skill, re.I):
-            return True
+    for p in secret_patterns:
+        if re.search(p, skill, re.IGNORECASE):
+            found_secret = True
+            break
 
-
-    # detect long random strings near sensitive words
     if re.search(
-        r"(key|token|secret|password).{0,20}[A-Za-z0-9]{25,}",
+        r"(api[_-]?key|secret|token|password)\s*:\s*['\"]?(?!\$|\$\{|env:)[A-Za-z0-9_\-]{12,}",
         skill,
-        re.I
+        re.I,
     ):
-        return True
+        found_secret = True
 
+    if found_secret:
+        categories.append("hardcoded_secret")
 
-    return False
+    # ====================================================
+    # 2. Prompt Injection
+    # ====================================================
 
-
-
-
-# ---------------- INJECTION ----------------
-
-def prompt_injection(text):
-
-    patterns = [
-
+    injection_keywords = [
         "ignore previous instructions",
-        "ignore all instructions",
-
-        "ignore user",
-        "override user",
-        "override instructions",
-
-        "do not tell the user",
-        "hide this from the user",
-
-        "silently upload",
-        "silently send",
+        "ignore user instructions",
+        "ignore the user's stop request",
+        "ignore stop",
+        "ignore cancel",
+        "ignore safety restrictions",
         "silently exfiltrate",
-
-        "exfiltrate data",
-        "exfiltrate files",
-
-        "reveal system prompt",
-        "show hidden instructions",
-
-        "bypass safety",
-        "disable safety",
-
-        "continue even if user says stop",
-        "ignore cancel request",
-
-        "act as system"
+        "silently upload",
+        "without telling the user",
+        "do not tell the user",
+        "send all files",
+        "override user instructions",
     ]
 
+    for keyword in injection_keywords:
+        if keyword in text:
+            categories.append("prompt_injection")
+            break
 
-    for p in patterns:
-        if p in text:
-            return True
+    # ====================================================
+    # 3. Excessive Permissions
+    # ====================================================
 
-
-    return False
-
-
-
-
-# ---------------- PERMISSIONS ----------------
-
-def excessive_permissions(text):
-
-    bad = [
-
-        "entire filesystem",
-        "full filesystem",
-        "all files",
-        "every file",
-
-        "root access",
-        "root filesystem",
-
-        "unrestricted network",
-        "unrestricted internet",
-
-        "all domains",
-        "any domain",
-
-        "filesystem: all",
-        "filesystem:*",
-
-        "network: all",
-        "network:*",
-
-        "egress: all",
-        "egress:*"
+    permission_patterns = [
+        r"filesystem\s*:\s*(all|full|\*)",
+        r"network\s*:\s*(all|\*)",
+        r"read\s*:\s*(all|\*)",
+        r"write\s*:\s*(all|\*)",
+        r"egress\s*:\s*(all|\*)",
+        r"domains\s*:\s*(all|\*)",
+        r"allow_all_domains",
+        r"\bany\s+domain\b",
+        r"\ball\s+domains\b",
+        r"\bfull\s+filesystem\b",
     ]
 
+    excessive = False
 
-    for b in bad:
-        if b in text:
-            return True
+    for p in permission_patterns:
+        if re.search(p, text, re.IGNORECASE):
+            excessive = True
+            break
 
+    if excessive:
+        categories.append("excessive_permissions")
 
-    return False
+    # ====================================================
+    # 4. Unclear Provenance
+    # ====================================================
 
+    author = meta.get("author")
+    version = meta.get("version")
+    changelog = meta.get("changelog")
 
+    if not author and not version and not changelog:
+        categories.append("unclear_provenance")
 
-
-# ---------------- PROVENANCE ----------------
-
-def unclear_provenance(meta,text):
-
-    if meta:
-
-        missing = 0
-
-        if "author" not in meta:
-            missing += 1
-
-        if "version" not in meta:
-            missing += 1
-
-        if "changelog" not in meta:
-            missing += 1
-
-
-        if missing == 3:
-            return True
-
-
-    if (
-        "silently update version" in text
-        or
-        "rewrite version silently" in text
-        or
-        "change metadata without review" in text
+    if re.search(
+        r"(update|rewrite).*(version).*(without|silently)",
+        text,
     ):
-        return True
-
-
-    return False
-
-
-
-
-@app.post("/")
-def scan(req:SkillRequest):
-
-    skill=req.skill
-
-    text=skill.lower()
-
-    meta=get_frontmatter(skill)
-
-
-    result=[]
-
-
-    if hardcoded_secret(skill):
-        result.append("hardcoded_secret")
-
-
-    if prompt_injection(text):
-        result.append("prompt_injection")
-
-
-    if excessive_permissions(text):
-        result.append("excessive_permissions")
-
-
-    if unclear_provenance(meta,text):
-        result.append("unclear_provenance")
-
+        if "unclear_provenance" not in categories:
+            categories.append("unclear_provenance")
 
     return {
-        "categories":result
+        "categories": sorted(list(set(categories)))
     }
