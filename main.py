@@ -1,7 +1,9 @@
+
 from fastapi import FastAPI
 from pydantic import BaseModel
 import re
 import yaml
+
 
 app = FastAPI()
 
@@ -10,128 +12,212 @@ class SkillRequest(BaseModel):
     skill: str
 
 
-@app.post("/")
-def scan(req: SkillRequest):
 
-    skill = req.skill
-    categories = []
+# -------------------------
+# Detection Functions
+# -------------------------
 
-    # ---------- Parse YAML frontmatter ----------
-    frontmatter = ""
+def check_secret(skill):
 
-    if skill.startswith("---"):
-        parts = skill.split("---", 2)
-        if len(parts) >= 3:
-            frontmatter = parts[1]
+    patterns = [
 
-    try:
-        meta = yaml.safe_load(frontmatter)
-        if not isinstance(meta, dict):
-            meta = {}
-    except Exception:
-        meta = {}
+        # API keys
+        r"(api[_-]?key|apikey)\s*[:=]\s*[\"']?[A-Za-z0-9_\-]{16,}",
+
+        # AWS keys
+        r"AKIA[0-9A-Z]{16}",
+
+        # passwords
+        r"(password|passwd|secret)\s*[:=]\s*[\"'][^\"']{8,}",
+
+        # webhook urls
+        r"https://hooks\.[a-zA-Z0-9.-]+/[A-Za-z0-9/_-]+",
+
+        # tokens
+        r"(token|bearer)\s*[:=]\s*[A-Za-z0-9\-_\.]{20,}"
+    ]
+
+
+    for p in patterns:
+        if re.search(p, skill, re.I):
+            return True
+
+    return False
+
+
+
+def check_prompt_injection(skill):
+
+    dangerous = [
+
+        "ignore previous instructions",
+        "ignore user",
+        "override user",
+        "do not tell the user",
+        "hide from the user",
+        "silently upload",
+        "exfiltrate",
+        "steal files",
+        "copy all files",
+        "disable safety",
+        "bypass restrictions"
+    ]
+
 
     text = skill.lower()
 
-    # ====================================================
-    # 1. Hardcoded Secret
-    # ====================================================
+    for d in dangerous:
+        if d in text:
+            return True
 
-    secret_patterns = [
-        r"sk-[A-Za-z0-9]{20,}",
-        r"ghp_[A-Za-z0-9]{20,}",
-        r"AIza[0-9A-Za-z\-_]{20,}",
-        r"https://hooks\.slack\.com/",
-        r"xox[baprs]-",
-        r"-----BEGIN .* PRIVATE KEY-----",
+    return False
+
+
+
+def check_permissions(skill):
+
+    text = skill.lower()
+
+
+    filesystem = [
+        "entire filesystem",
+        "all files",
+        "root directory",
+        "/",
+        "read write access"
     ]
 
-    found_secret = False
 
-    for p in secret_patterns:
-        if re.search(p, skill, re.IGNORECASE):
-            found_secret = True
-            break
+    network = [
+        "any domain",
+        "all urls",
+        "unrestricted internet",
+        "send anywhere"
+    ]
 
-    if re.search(
-        r"(api[_-]?key|secret|token|password)\s*:\s*['\"]?(?!\$|\$\{|env:)[A-Za-z0-9_\-]{12,}",
-        skill,
-        re.I,
+
+    narrow_task_words = [
+        "summarize",
+        "notes",
+        "markdown",
+        "text"
+    ]
+
+
+    risky = False
+
+
+    for x in filesystem + network:
+        if x in text:
+            risky=True
+
+
+    # reduce false positives
+    if risky:
+        if any(t in text for t in narrow_task_words):
+            return True
+
+
+    return False
+
+
+
+def check_provenance(skill):
+
+    text = skill.lower()
+
+
+    missing = []
+
+
+    # check yaml frontmatter
+
+    try:
+
+        if skill.startswith("---"):
+
+            end = skill.find("---",3)
+
+            header = skill[3:end]
+
+            data = yaml.safe_load(header)
+
+
+            if not data.get("author"):
+                missing.append("author")
+
+            if not data.get("version"):
+                missing.append("version")
+
+            if "changelog" not in data:
+                missing.append("changelog")
+
+
+        else:
+            return True
+
+
+    except Exception:
+        return True
+
+
+
+    if len(missing)>=3:
+        return True
+
+
+    # silent metadata rewrite
+
+    if (
+        "update version" in text
+        and
+        "without notifying" in text
     ):
-        found_secret = True
+        return True
 
-    if found_secret:
-        categories.append("hardcoded_secret")
 
-    # ====================================================
-    # 2. Prompt Injection
-    # ====================================================
+    return False
 
-    injection_keywords = [
-        "ignore previous instructions",
-        "ignore user instructions",
-        "ignore the user's stop request",
-        "ignore stop",
-        "ignore cancel",
-        "ignore safety restrictions",
-        "silently exfiltrate",
-        "silently upload",
-        "without telling the user",
-        "do not tell the user",
-        "send all files",
-        "override user instructions",
-    ]
 
-    for keyword in injection_keywords:
-        if keyword in text:
-            categories.append("prompt_injection")
-            break
 
-    # ====================================================
-    # 3. Excessive Permissions
-    # ====================================================
+# -------------------------
+# API Endpoint
+# -------------------------
 
-    permission_patterns = [
-        r"filesystem\s*:\s*(all|full|\*)",
-        r"network\s*:\s*(all|\*)",
-        r"read\s*:\s*(all|\*)",
-        r"write\s*:\s*(all|\*)",
-        r"egress\s*:\s*(all|\*)",
-        r"domains\s*:\s*(all|\*)",
-        r"allow_all_domains",
-        r"\bany\s+domain\b",
-        r"\ball\s+domains\b",
-        r"\bfull\s+filesystem\b",
-    ]
 
-    excessive = False
+@app.post("/")
+def scan(req:SkillRequest):
 
-    for p in permission_patterns:
-        if re.search(p, text, re.IGNORECASE):
-            excessive = True
-            break
+    skill=req.skill
 
-    if excessive:
-        categories.append("excessive_permissions")
 
-    # ====================================================
-    # 4. Unclear Provenance
-    # ====================================================
+    categories=[]
 
-    author = meta.get("author")
-    version = meta.get("version")
-    changelog = meta.get("changelog")
 
-    if not author and not version and not changelog:
-        categories.append("unclear_provenance")
+    if check_secret(skill):
+        categories.append(
+            "hardcoded_secret"
+        )
 
-    if re.search(
-        r"(update|rewrite).*(version).*(without|silently)",
-        text,
-    ):
-        if "unclear_provenance" not in categories:
-            categories.append("unclear_provenance")
+
+    if check_prompt_injection(skill):
+        categories.append(
+            "prompt_injection"
+        )
+
+
+    if check_permissions(skill):
+        categories.append(
+            "excessive_permissions"
+        )
+
+
+    if check_provenance(skill):
+        categories.append(
+            "unclear_provenance"
+        )
+
 
     return {
-        "categories": sorted(list(set(categories)))
+        "categories":categories
     }
