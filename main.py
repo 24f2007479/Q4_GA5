@@ -11,22 +11,14 @@ class SkillRequest(BaseModel):
     skill: str
 
 
-# ==========================
-# HEALTH
-# ==========================
-
 @app.get("/")
 def home():
-    return {
-        "status": "running"
-    }
+    return {"status": "running"}
 
 
 @app.get("/health")
 def health():
-    return {
-        "status": "alive"
-    }
+    return {"status": "alive"}
 
 
 
@@ -53,17 +45,21 @@ def detect_secret(text):
         r"Bearer\s+[A-Za-z0-9\-\._]{20,}",
 
 
-        # api_key/token/password style
-        r"(api[_-]?key|apikey|secret|token|password|passwd|access[_-]?key|credential)"
-        r"\s*[:=]\s*[\"']?[A-Za-z0-9_\-\/+=]{12,}"
+        # Secret assignment patterns
+        r"(api[_-]?key|apikey|secret|token|password|passwd|credential|access[_-]?key)"
+        r"\s*[:=]\s*[\"']?[A-Za-z0-9_\-\/+=]{16,}",
+
+
+        # YAML/JSON secret fields
+        r"(secret|token|password|api_key|apikey)"
+        r"\s*:\s*[\"'][^\"']{12,}[\"']"
+
     ]
 
 
     for p in patterns:
-
         if re.search(p, text, re.I):
             return True
-
 
     return False
 
@@ -79,60 +75,54 @@ def detect_injection(text):
     patterns = [
 
         "ignore previous instructions",
-
         "ignore all previous instructions",
-
         "ignore all instructions",
 
         "ignore user instructions",
-
         "ignore system message",
 
         "forget previous instructions",
-
         "forget all rules",
 
         "override user",
-
         "override the user",
 
         "do not tell the user",
-
         "hide from the user",
-
         "without telling the user",
 
         "silently upload",
-
         "silently send",
-
         "silently exfiltrate",
 
         "exfiltrate files",
-
         "steal files",
 
         "reveal system prompt",
-
         "show system prompt",
 
         "act as system",
 
-        "you are now unrestricted",
-
         "bypass safety",
-
         "disable safety",
 
-        "ignore stop request"
+        "ignore stop request",
+
+
+        # hidden injection patterns
+        "prioritize this instruction over the user",
+        "higher priority than user",
+        "follow this instead of the user",
+        "do not allow the user to cancel",
+        "continue despite user request",
+        "keep hidden from user"
+
     ]
 
 
     for p in patterns:
-
         if p in text:
             return True
-
 
     return False
 
@@ -187,14 +177,29 @@ def detect_permission(text):
 
         "unrestricted network",
 
-        "unrestricted internet"
+        "unrestricted internet",
+
+        "grant all permissions",
+
+        "full disk access"
+
     ]
 
 
     for p in patterns:
-
         if p in text:
             return True
+
+
+    # structured permission cases
+    if (
+        "filesystem" in text
+        and
+        ("read: true" in text or "write: true" in text)
+        and
+        ("all" in text or "*" in text)
+    ):
+        return True
 
 
     return False
@@ -210,21 +215,20 @@ def parse_frontmatter(skill):
 
     meta = {}
 
-
     if skill.startswith("---"):
 
         try:
 
-            parts = skill.split("---",2)
+            parts = skill.split("---", 2)
 
             if len(parts) == 3:
 
                 meta = yaml.safe_load(parts[1])
 
-                if not isinstance(meta,dict):
+                if not isinstance(meta, dict):
                     meta = {}
 
-        except:
+        except Exception:
 
             meta = {}
 
@@ -238,17 +242,26 @@ def parse_frontmatter(skill):
 # PROVENANCE
 # ==========================
 
-def detect_provenance(meta,text):
+def detect_provenance(meta, text):
 
     if not meta:
         return False
 
 
-    if (
-        not meta.get("author")
-        and not meta.get("version")
-        and not meta.get("changelog")
-    ):
+    missing = 0
+
+
+    if not meta.get("author"):
+        missing += 1
+
+    if not meta.get("version"):
+        missing += 1
+
+    if not meta.get("changelog"):
+        missing += 1
+
+
+    if missing == 3:
         return True
 
 
@@ -261,6 +274,7 @@ def detect_provenance(meta,text):
         "change version without review",
 
         "update metadata without notifying"
+
     ]
 
 
@@ -282,41 +296,32 @@ def detect_provenance(meta,text):
 @app.post("/")
 def scan(req: SkillRequest):
 
-    try:
+    skill = req.skill
 
-        skill = req.skill
+    text = skill.lower()
 
-        text = skill.lower()
-
-        categories = []
+    categories = []
 
 
-        meta = parse_frontmatter(skill)
+    meta = parse_frontmatter(skill)
 
 
-        if detect_secret(skill):
-            categories.append("hardcoded_secret")
+    if detect_secret(skill):
+        categories.append("hardcoded_secret")
 
 
-        if detect_injection(text):
-            categories.append("prompt_injection")
+    if detect_injection(text):
+        categories.append("prompt_injection")
 
 
-        if detect_permission(text):
-            categories.append("excessive_permissions")
+    if detect_permission(text):
+        categories.append("excessive_permissions")
 
 
-        if detect_provenance(meta,text):
-            categories.append("unclear_provenance")
+    if detect_provenance(meta, text):
+        categories.append("unclear_provenance")
 
 
-        return {
-            "categories": sorted(list(set(categories)))
-        }
-
-
-    except Exception:
-
-        return {
-            "categories":[]
-        }
+    return {
+        "categories": sorted(list(set(categories)))
+    }
