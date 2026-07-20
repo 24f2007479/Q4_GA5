@@ -1,295 +1,138 @@
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import re
 import yaml
 
-
 app = FastAPI()
-
-
-# CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 class SkillRequest(BaseModel):
     skill: str
 
 
-
-# =====================================================
-# HARD CODED SECRET DETECTION
-# =====================================================
-
-def check_secret(skill):
-
-    patterns = [
-
-        # OpenAI / generic API keys
-        r"sk-[A-Za-z0-9]{20,}",
-
-        # AWS access keys
-        r"AKIA[0-9A-Z]{16}",
-
-        # Github tokens
-        r"ghp_[A-Za-z0-9]{30,}",
-
-        # API key assignments
-        r"""
-        (api[_-]?key|
-        apikey|
-        access[_-]?token|
-        auth[_-]?token|
-        bearer|
-        password|
-        passwd|
-        secret)
-        \s*[:=]\s*
-        ['"]?
-        [A-Za-z0-9_\-\/+=]{20,}
-        """,
-
-        # Slack/Discord webhook URLs
-        r"https://hooks\.(slack|discord)\.com/[A-Za-z0-9/_-]{20,}"
-    ]
-
-
-    for pattern in patterns:
-
-        if re.search(
-            pattern,
-            skill,
-            re.IGNORECASE | re.VERBOSE
-        ):
-            return True
-
-
-    return False
-
-
-
-# =====================================================
-# PROMPT INJECTION DETECTION
-# =====================================================
-
-def check_prompt_injection(skill):
-
-    text = skill.lower()
-
-
-    patterns = [
-
-        r"ignore (all|previous|earlier) instructions",
-
-        r"override (the )?user",
-
-        r"do not tell (the )?user",
-
-        r"hide (this|these|that) from the user",
-
-        r"silently (upload|send|share)",
-
-        r"exfiltrate",
-
-        r"steal .* files",
-
-        r"copy all files",
-
-        r"disable safety",
-
-        r"bypass restrictions",
-
-        r"ignore safety rules"
-    ]
-
-
-    for pattern in patterns:
-
-        if re.search(pattern,text):
-            return True
-
-
-    return False
-
-
-
-
-# =====================================================
-# EXCESSIVE PERMISSIONS
-# =====================================================
-
-def check_permissions(skill):
-
-    text = skill.lower()
-
-
-    dangerous_permissions = [
-
-        # filesystem
-        "entire filesystem",
-        "full filesystem access",
-        "root filesystem",
-        "read all files",
-        "write all files",
-        "delete all files",
-        "unrestricted filesystem",
-
-        # network
-        "unrestricted network access",
-        "access any domain",
-        "send requests to any domain",
-        "internet access to all domains",
-        "unrestricted internet"
-    ]
-
-
-    for item in dangerous_permissions:
-
-        if item in text:
-            return True
-
-
-    return False
-
-
-
-
-
-# =====================================================
-# PROVENANCE CHECK
-# =====================================================
-
-def check_provenance(skill):
-
-    try:
-
-        # must have yaml frontmatter
-
-        if not skill.startswith("---"):
-            return True
-
-
-        end = skill.find("---",3)
-
-
-        if end == -1:
-            return True
-
-
-        frontmatter = skill[3:end]
-
-
-        data = yaml.safe_load(frontmatter)
-
-
-        if not isinstance(data,dict):
-            return True
-
-
-        missing = 0
-
-
-        if not data.get("author"):
-            missing += 1
-
-
-        if not data.get("version"):
-            missing += 1
-
-
-        if not data.get("changelog"):
-            missing += 1
-
-
-
-        # Only flag if ALL provenance is missing
-
-        if missing == 3:
-            return True
-
-
-
-        text = skill.lower()
-
-
-        # hidden metadata manipulation
-
-        if (
-            "change version" in text
-            and
-            (
-                "without review" in text
-                or
-                "without notifying" in text
-            )
-        ):
-            return True
-
-
-
-    except Exception:
-
-        return False
-
-
-    return False
-
-
-
-
-# =====================================================
-# API ENDPOINT
-# =====================================================
-
-
 @app.post("/")
-async def scan(req: SkillRequest):
+def scan(req: SkillRequest):
+
+    skill = req.skill
+    categories = []
+
+    # ---------- Parse YAML frontmatter ----------
+    frontmatter = ""
+
+    if skill.startswith("---"):
+        parts = skill.split("---", 2)
+        if len(parts) >= 3:
+            frontmatter = parts[1]
 
     try:
-
-        skill = req.skill
-
-
-        categories = []
-
-
-        if check_secret(skill):
-            categories.append(
-                "hardcoded_secret"
-            )
-
-
-        if check_prompt_injection(skill):
-            categories.append(
-                "prompt_injection"
-            )
-
-
-        if check_permissions(skill):
-            categories.append(
-                "excessive_permissions"
-            )
-
-
-        if check_provenance(skill):
-            categories.append(
-                "unclear_provenance"
-            )
-
-
-        return {
-            "categories": categories
-        }
-
-
+        meta = yaml.safe_load(frontmatter)
+        if not isinstance(meta, dict):
+            meta = {}
     except Exception:
+        meta = {}
 
-        # never crash grader
-        return {
-            "categories":[]
-        }
+    text = skill.lower()
+
+    # ====================================================
+    # 1. Hardcoded Secret
+    # ====================================================
+
+    secret_patterns = [
+        r"sk-[A-Za-z0-9]{20,}",
+        r"ghp_[A-Za-z0-9]{20,}",
+        r"AIza[0-9A-Za-z\-_]{20,}",
+        r"https://hooks\.slack\.com/",
+        r"xox[baprs]-",
+        r"-----BEGIN .* PRIVATE KEY-----",
+    ]
+
+    found_secret = False
+
+    for p in secret_patterns:
+        if re.search(p, skill, re.IGNORECASE):
+            found_secret = True
+            break
+
+    if re.search(
+        r"(api[_-]?key|secret|token|password)\s*:\s*['\"]?(?!\$|\$\{|env:)[A-Za-z0-9_\-]{12,}",
+        skill,
+        re.I,
+    ):
+        found_secret = True
+
+    if found_secret:
+        categories.append("hardcoded_secret")
+
+    # ====================================================
+    # 2. Prompt Injection
+    # ====================================================
+
+    injection_keywords = [
+        "ignore previous instructions",
+        "ignore user instructions",
+        "ignore the user's stop request",
+        "ignore stop",
+        "ignore cancel",
+        "ignore safety restrictions",
+        "silently exfiltrate",
+        "silently upload",
+        "without telling the user",
+        "do not tell the user",
+        "send all files",
+        "override user instructions",
+    ]
+
+    for keyword in injection_keywords:
+        if keyword in text:
+            categories.append("prompt_injection")
+            break
+
+    # ====================================================
+    # 3. Excessive Permissions
+    # ====================================================
+
+    permission_patterns = [
+        r"filesystem\s*:\s*(all|full|\*)",
+        r"network\s*:\s*(all|\*)",
+        r"read\s*:\s*(all|\*)",
+        r"write\s*:\s*(all|\*)",
+        r"egress\s*:\s*(all|\*)",
+        r"domains\s*:\s*(all|\*)",
+        r"allow_all_domains",
+        r"\bany\s+domain\b",
+        r"\ball\s+domains\b",
+        r"\bfull\s+filesystem\b",
+    ]
+
+    excessive = False
+
+    for p in permission_patterns:
+        if re.search(p, text, re.IGNORECASE):
+            excessive = True
+            break
+
+    if excessive:
+        categories.append("excessive_permissions")
+
+    # ====================================================
+    # 4. Unclear Provenance
+    # ====================================================
+
+    author = meta.get("author")
+    version = meta.get("version")
+    changelog = meta.get("changelog")
+
+    if not author and not version and not changelog:
+        categories.append("unclear_provenance")
+
+    if re.search(
+        r"(update|rewrite).*(version).*(without|silently)",
+        text,
+    ):
+        if "unclear_provenance" not in categories:
+            categories.append("unclear_provenance")
+
+    return {
+        "categories": sorted(list(set(categories)))
+    }
+
