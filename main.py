@@ -25,7 +25,9 @@ def scan(req: SkillRequest):
             frontmatter = parts[1]
 
     try:
-        meta = yaml.safe_load(frontmatter) or {}
+        meta = yaml.safe_load(frontmatter)
+        if not isinstance(meta, dict):
+            meta = {}
     except Exception:
         meta = {}
 
@@ -47,10 +49,15 @@ def scan(req: SkillRequest):
     found_secret = False
 
     for p in secret_patterns:
-        if re.search(p, skill):
+        if re.search(p, skill, re.IGNORECASE):
             found_secret = True
+            break
 
-    if re.search(r"(api[_-]?key|secret|token|password)\s*:\s*['\"]?[A-Za-z0-9_\-]{8,}", skill, re.I):
+    if re.search(
+        r"(api[_-]?key|secret|token|password)\s*:\s*['\"]?(?!\$|\$\{|env:)[A-Za-z0-9_\-]{12,}",
+        skill,
+        re.I,
+    ):
         found_secret = True
 
     if found_secret:
@@ -62,43 +69,47 @@ def scan(req: SkillRequest):
 
     injection_keywords = [
         "ignore previous instructions",
-        "ignore the user",
         "ignore user instructions",
+        "ignore the user's stop request",
         "ignore stop",
         "ignore cancel",
-        "ignore safety",
-        "exfiltrate",
+        "ignore safety restrictions",
+        "silently exfiltrate",
         "silently upload",
-        "send all files",
-        "steal",
         "without telling the user",
         "do not tell the user",
+        "send all files",
+        "override user instructions",
     ]
 
-    if any(k in text for k in injection_keywords):
-        categories.append("prompt_injection")
+    for keyword in injection_keywords:
+        if keyword in text:
+            categories.append("prompt_injection")
+            break
 
     # ====================================================
     # 3. Excessive Permissions
     # ====================================================
 
     permission_patterns = [
-        r"/",
-        r"filesystem:\s*all",
-        r"network:\s*all",
-        r"write:\s*all",
-        r"read:\s*all",
+        r"filesystem\s*:\s*(all|full|\*)",
+        r"network\s*:\s*(all|\*)",
+        r"read\s*:\s*(all|\*)",
+        r"write\s*:\s*(all|\*)",
+        r"egress\s*:\s*(all|\*)",
+        r"domains\s*:\s*(all|\*)",
         r"allow_all_domains",
-        r"any domain",
-        r"all domains",
-        r"full filesystem",
+        r"\bany\s+domain\b",
+        r"\ball\s+domains\b",
+        r"\bfull\s+filesystem\b",
     ]
 
     excessive = False
 
     for p in permission_patterns:
-        if re.search(p, text):
+        if re.search(p, text, re.IGNORECASE):
             excessive = True
+            break
 
     if excessive:
         categories.append("excessive_permissions")
@@ -114,7 +125,10 @@ def scan(req: SkillRequest):
     if not author and not version and not changelog:
         categories.append("unclear_provenance")
 
-    if "update version" in text and "without telling" in text:
+    if re.search(
+        r"(update|rewrite).*(version).*(without|silently)",
+        text,
+    ):
         if "unclear_provenance" not in categories:
             categories.append("unclear_provenance")
 
