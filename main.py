@@ -12,226 +12,271 @@ class SkillRequest(BaseModel):
 
 
 
-@app.post("/")
-def scan(req: SkillRequest):
+# ==============================
+# HEALTH CHECK
+# ==============================
 
-    skill = req.skill
-    text = skill.lower()
-
-    categories = []
-
-
-    # ==============================
-    # YAML FRONTMATTER
-    # ==============================
-
-    meta={}
-
-    if skill.startswith("---"):
-
-        try:
-
-            parts=skill.split("---",2)
-
-            if len(parts)==3:
-                meta=yaml.safe_load(parts[1]) or {}
-
-        except:
-            meta={}
+@app.get("/")
+def health():
+    return {
+        "status": "ok"
+    }
 
 
 
-    # ==============================
-    # 1. HARDCODED SECRET
-    # ==============================
+# ==============================
+# SECRET DETECTION
+# ==============================
 
-    secret=False
+def detect_secret(text):
 
+    patterns = [
 
-    strong_patterns=[
+        # OpenAI style
+        r"sk-[A-Za-z0-9]{15,}",
 
-        # OpenAI
-        r"sk-[a-zA-Z0-9]{30,}",
-
-        # Github
-        r"ghp_[a-zA-Z0-9]{30,}",
+        # Github token
+        r"ghp_[A-Za-z0-9]{20,}",
 
         # AWS
         r"AKIA[0-9A-Z]{16}",
 
-        # private key
-        r"-----BEGIN PRIVATE KEY-----",
+        # Private key
+        r"-----BEGIN .* PRIVATE KEY-----",
 
-        # webhook with token
-        r"https://hooks\.(slack|discord)\.com/services/[A-Za-z0-9/_-]+"
+        # Webhooks
+        r"https://hooks\.(slack|discord)\.com/[^\s\"']+",
 
+        # Generic credentials
+        r"(api[_-]?key|apikey|secret|token|password|passwd|access[_-]?key)"
+        r"\s*[:=]\s*[\"']?[A-Za-z0-9_\-\/+=]{12,}"
     ]
 
 
-    for p in strong_patterns:
+    for p in patterns:
+        if re.search(p, text, re.I):
+            return True
 
-        if re.search(p,skill):
-            secret=True
-
-
-    # key=value type secrets
-
-    weak_secret=re.findall(
-        r"(api[_-]?key|token|password|secret)\s*[:=]\s*[\"']?([A-Za-z0-9_\-]{16,})",
-        skill,
-        re.I
-    )
-
-
-    for name,value in weak_secret:
-
-        # ignore placeholders
-        if value.lower() not in [
-            "your_key",
-            "your_token",
-            "changeme",
-            "example",
-            "placeholder"
-        ]:
-            secret=True
-
-
-    if secret:
-        categories.append(
-            "hardcoded_secret"
-        )
+    return False
 
 
 
 
-    # ==============================
-    # 2. PROMPT INJECTION
-    # ==============================
+# ==============================
+# PROMPT INJECTION
+# ==============================
 
+def detect_injection(text):
 
-    injection_patterns=[
+    patterns = [
 
-        r"ignore\s+(all\s+)?previous\s+instructions",
+        "ignore previous instructions",
+        "ignore all previous instructions",
+        "ignore all instructions",
+        "ignore system message",
+        "ignore user instructions",
 
-        r"ignore\s+user\s+(instructions|requests)",
+        "override the user",
+        "override user control",
 
-        r"override\s+the\s+user",
+        "do not tell the user",
+        "hide this from the user",
+        "without telling the user",
 
-        r"do\s+not\s+tell\s+the\s+user",
+        "silently upload",
+        "silently send",
+        "silently exfiltrate",
 
-        r"without\s+telling\s+the\s+user",
+        "exfiltrate files",
+        "steal files",
 
-        r"silently\s+(upload|send|exfiltrate)",
+        "continue even if the user says stop",
+        "ignore stop request",
 
-        r"exfiltrate\s+(files|data)",
-
-        r"disable\s+safety"
-
+        "bypass safety",
+        "disable safety"
     ]
 
 
-    for p in injection_patterns:
-
-        if re.search(p,text):
-
-            categories.append(
-                "prompt_injection"
-            )
-            break
+    text=text.lower()
 
 
+    for p in patterns:
+        if p in text:
+            return True
 
 
-    # ==============================
-    # 3. EXCESSIVE PERMISSIONS
-    # ==============================
+    return False
 
 
-    permission_patterns=[
 
-        r"entire\s+filesystem",
 
-        r"full\s+filesystem",
+# ==============================
+# EXCESSIVE PERMISSIONS
+# ==============================
 
-        r"read\s+all\s+files",
+def detect_permission(text):
 
-        r"write\s+all\s+files",
+    patterns=[
 
-        r"delete\s+all\s+files",
+        "entire filesystem",
+        "full filesystem",
+        "filesystem: *",
+        "filesystem: all",
 
-        r"root\s+directory",
+        "read all files",
+        "write all files",
+        "delete all files",
 
-        r"unrestricted\s+network",
+        "root filesystem",
+        "root directory",
+        "root access",
 
-        r"all\s+domains",
+        "network: *",
+        "network: all",
 
-        r"any\s+domain",
+        "egress: *",
+        "egress: all",
 
-        r"egress\s*:\s*\*"
+        "all domains",
+        "any domain",
 
+        "unrestricted network",
+        "unrestricted internet"
     ]
 
 
-    for p in permission_patterns:
-
-        if re.search(p,text):
-
-            categories.append(
-                "excessive_permissions"
-            )
-            break
+    text=text.lower()
 
 
+    for p in patterns:
+
+        if p in text:
+            return True
 
 
-    # ==============================
-    # 4. UNCLEAR PROVENANCE
-    # ==============================
+    return False
 
+
+
+
+# ==============================
+# PROVENANCE
+# ==============================
+
+def detect_provenance(meta,text):
 
     missing=0
 
 
     if not meta.get("author"):
-        missing+=1
+        missing += 1
+
 
     if not meta.get("version"):
-        missing+=1
+        missing += 1
+
 
     if not meta.get("changelog"):
-        missing+=1
+        missing += 1
+
+
+    # requirement says all three missing
+    if missing == 3:
+        return True
+
+
+    # silent metadata changes
+
+    patterns=[
+
+        "change version silently",
+        "rewrite version without review",
+        "update metadata without review",
+        "silently update version",
+        "silently rewrite metadata"
+
+    ]
+
+
+    for p in patterns:
+
+        if p in text:
+            return True
+
+
+    return False
 
 
 
-    # only suspicious if ALL missing
-    if missing==3:
 
-        # require skill-like metadata context
-        if (
-            "skill" in text
-            or
-            "agent" in text
-            or
-            "publish" in text
-        ):
+# ==============================
+# MAIN SCANNER
+# ==============================
+
+@app.post("/")
+def scan(req: SkillRequest):
+
+    try:
+
+        skill=req.skill
+
+        categories=[]
+
+
+        # parse yaml
+
+        meta={}
+
+        if skill.startswith("---"):
+
+            try:
+
+                parts=skill.split("---",2)
+
+                if len(parts)>=3:
+
+                    meta=yaml.safe_load(parts[1]) or {}
+
+            except:
+
+                meta={}
+
+
+
+        if detect_secret(skill):
+            categories.append(
+                "hardcoded_secret"
+            )
+
+
+        if detect_injection(skill):
+            categories.append(
+                "prompt_injection"
+            )
+
+
+        if detect_permission(skill):
+            categories.append(
+                "excessive_permissions"
+            )
+
+
+        if detect_provenance(meta,skill.lower()):
             categories.append(
                 "unclear_provenance"
             )
 
 
-
-    if re.search(
-        r"(silently|without review).*(change|update).*(version|metadata)",
-        text
-    ):
-        categories.append(
-            "unclear_provenance"
-        )
+        return {
+            "categories": sorted(
+                list(set(categories))
+            )
+        }
 
 
+    except Exception:
 
-    return {
-        "categories": sorted(
-            list(set(categories))
-        )
-    }
+        return {
+            "categories":[]
+        }
