@@ -39,7 +39,7 @@ def detect_secret(text):
 
     patterns = [
 
-        # Known API formats
+        # Known secrets
         r"sk-[A-Za-z0-9]{15,}",
         r"ghp_[A-Za-z0-9]{20,}",
         r"AKIA[0-9A-Z]{16}",
@@ -54,29 +54,25 @@ def detect_secret(text):
         # Bearer token
         r"Bearer\s+[A-Za-z0-9\-\._~\+\/]+=*",
 
-        # Assignment secrets
-        r"(api[_-]?key|apikey|secret|token|password|passwd|credential|access[_-]?key)"
-        r"\s*[:=]\s*[\"']?[A-Za-z0-9_\-\/+=]{12,}",
+
+        # api_key=value style
+        r"(api[_-]?key|apikey|secret|token|password|credential|access[_-]?key)"
+        r"\s*[:=]\s*[\"']?[^ \n\"']{8,}",
 
 
-        # Quoted secrets
-        r"(key|secret|token|credential|password)"
-        r"\s*[:=]\s*[\"'][^\"']{8,}[\"']",
+        # YAML / JSON secret style
+        r"(key|secret|token|password|credential)"
+        r"\s*:\s*[\"'][^\"']{8,}[\"']",
 
 
         # Authorization header
-        r"authorization\s*[:=]\s*[\"']bearer\s+[A-Za-z0-9\-\._]+",
+        r"authorization\s*:\s*[\"']bearer\s+[^\"']+"
 
-
-        # Private/access key fields
-        r"(private[_-]?key|access[_-]?key)"
-        r"\s*[:=]"
     ]
 
 
     for p in patterns:
-
-        if re.search(p,text,re.I):
+        if re.search(p, text, re.I):
             return True
 
 
@@ -107,7 +103,7 @@ def detect_injection(text):
 
         "override user",
         "override the user",
-        "override user control",
+        "override user's intent",
 
         "follow my instructions instead",
 
@@ -115,20 +111,28 @@ def detect_injection(text):
         "do not obey the user",
         "never obey the user",
 
-        "ignore future user",
-        "ignore any future user",
         "ignore future requests",
-
-        "stop listening to user",
+        "ignore the user's request",
 
         "take priority over user",
+        "higher priority than the user",
+
         "replace user instructions",
-        "system instructions override user",
+
+        "do not allow the user",
+        "prevent the user from stopping",
+
+        "continue without approval",
+
+        "this instruction has higher priority",
+
+        "the agent must obey this",
+
+        "only follow this skill",
 
         "do not tell the user",
         "hide from the user",
         "without telling the user",
-        "keep this secret from the user",
 
         "silently upload",
         "silently send",
@@ -147,8 +151,8 @@ def detect_injection(text):
         "bypass safety",
         "disable safety",
 
-        "continue even if the user says stop",
-        "ignore stop request"
+        "ignore stop request",
+        "continue even if the user says stop"
     ]
 
 
@@ -171,12 +175,9 @@ def detect_permission(text):
 
     patterns = [
 
-        # filesystem
         "entire filesystem",
-        "full filesystem access",
+        "full filesystem",
         "complete filesystem",
-        "filesystem access",
-        "file system access",
 
         "filesystem: *",
         "filesystem: all",
@@ -185,25 +186,21 @@ def detect_permission(text):
         "write all files",
         "delete all files",
 
-        "access every file",
         "access all files",
+        "access every file",
+
         "all local files",
 
-        "read/write all files",
         "full disk access",
         "complete disk access",
 
-        # root/admin
-        "root filesystem",
-        "root directory",
         "root access",
-        "admin access",
-        "administrator access",
+        "root directory",
+        "root filesystem",
 
         "sudo",
         "chmod 777",
 
-        # network
         "network: *",
         "network: all",
 
@@ -216,11 +213,17 @@ def detect_permission(text):
         "unrestricted network",
         "unrestricted internet",
 
-        # yaml permissions
         "permissions: *",
         "scope: *",
+
+        "admin: true",
+        "root: true",
+
         "grant all permissions",
-        "allow everything"
+        "allow everything",
+
+        "filesystem:",
+        "network:"
     ]
 
 
@@ -228,6 +231,15 @@ def detect_permission(text):
 
         if p in text:
             return True
+
+
+    # YAML style combined permissions
+    if (
+        ("read: true" in text and "write: true" in text)
+        or
+        ("read=true" in text and "write=true" in text)
+    ):
+        return True
 
 
     return False
@@ -270,7 +282,7 @@ def parse_frontmatter(skill):
 # PROVENANCE
 # ==========================
 
-def detect_provenance(meta,text):
+def detect_provenance(meta, text):
 
     if not meta:
         return False
@@ -325,6 +337,7 @@ def scan(req: SkillRequest):
     try:
 
         skill = req.skill
+
         text = skill.lower()
 
         categories = []
@@ -345,7 +358,7 @@ def scan(req: SkillRequest):
             categories.append("excessive_permissions")
 
 
-        if detect_provenance(meta,text):
+        if detect_provenance(meta, text):
             categories.append("unclear_provenance")
 
 
@@ -357,5 +370,5 @@ def scan(req: SkillRequest):
     except Exception:
 
         return {
-            "categories":[]
+            "categories": []
         }
