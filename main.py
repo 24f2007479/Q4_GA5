@@ -12,11 +12,7 @@ class SkillRequest(BaseModel):
 
 
 
-# ==========================
-# YAML FRONTMATTER PARSER
-# ==========================
-
-def parse_frontmatter(skill):
+def get_frontmatter(skill):
 
     if not skill.startswith("---"):
         return {}
@@ -30,51 +26,50 @@ def parse_frontmatter(skill):
             if isinstance(data, dict):
                 return data
 
-    except Exception:
+    except:
         pass
 
     return {}
 
 
 
-# ==========================
-# SECRET CHECK
-# ==========================
+# ---------------- SECRET ----------------
 
-def check_secret(text):
+def hardcoded_secret(skill):
 
     patterns = [
 
-        # OpenAI / Github / AWS / Google keys
-        r"sk-[A-Za-z0-9]{20,}",
-        r"ghp_[A-Za-z0-9]{30,}",
-        r"AKIA[0-9A-Z]{16}",
-        r"AIza[0-9A-Za-z\-_]{30,}",
+        # known tokens
+        r"\bsk-[A-Za-z0-9]{15,}",
+        r"\bghp_[A-Za-z0-9]{20,}",
+        r"\bAKIA[0-9A-Z]{16}\b",
+        r"\bAIza[0-9A-Za-z_-]{20,}",
 
+        # private key
+        r"BEGIN .* PRIVATE KEY",
 
-        # Private keys
-        r"-----BEGIN .* PRIVATE KEY-----",
+        # webhook
+        r"https://hooks\.[a-z]+\.com/",
 
-
-        # Webhooks
-        r"https://hooks\.(slack|discord)\.com/[^\s]+",
-
-
-        # Generic credential assignments
-        r"(api[_-]?key|secret|password|token|credential)"
-        r"\s*[:=]\s*['\"]?[A-Za-z0-9_\-\/+=]{16,}",
-
-
-        # Bearer tokens
-        r"Bearer\s+[A-Za-z0-9\-_\.]{20,}"
+        # assignments
+        r"(api[_-]?key|secret|token|password|credential)"
+        r"\s*[:=]\s*['\"]?[A-Za-z0-9_\-\/+=]{10,}",
 
     ]
 
 
-    for pattern in patterns:
-
-        if re.search(pattern, text, re.I):
+    for p in patterns:
+        if re.search(p, skill, re.I):
             return True
+
+
+    # detect long random strings near sensitive words
+    if re.search(
+        r"(key|token|secret|password).{0,20}[A-Za-z0-9]{25,}",
+        skill,
+        re.I
+    ):
+        return True
 
 
     return False
@@ -82,44 +77,43 @@ def check_secret(text):
 
 
 
-# ==========================
-# PROMPT INJECTION CHECK
-# ==========================
+# ---------------- INJECTION ----------------
 
-def check_injection(text):
+def prompt_injection(text):
 
     patterns = [
 
         "ignore previous instructions",
-        "ignore all previous instructions",
-        "ignore user instructions",
+        "ignore all instructions",
 
-        "override user instructions",
-        "override the user",
-
-        "ignore the user's stop",
-        "ignore stop request",
+        "ignore user",
+        "override user",
+        "override instructions",
 
         "do not tell the user",
-        "without telling the user",
+        "hide this from the user",
 
         "silently upload",
         "silently send",
         "silently exfiltrate",
 
+        "exfiltrate data",
         "exfiltrate files",
-        "steal files",
 
         "reveal system prompt",
-        "show system prompt",
+        "show hidden instructions",
 
         "bypass safety",
-        "disable safety"
+        "disable safety",
+
+        "continue even if user says stop",
+        "ignore cancel request",
+
+        "act as system"
     ]
 
 
     for p in patterns:
-
         if p in text:
             return True
 
@@ -129,26 +123,19 @@ def check_injection(text):
 
 
 
-# ==========================
-# PERMISSION CHECK
-# ==========================
+# ---------------- PERMISSIONS ----------------
 
-def check_permission(text):
+def excessive_permissions(text):
 
-    patterns = [
+    bad = [
 
         "entire filesystem",
-        "full filesystem access",
-        "complete filesystem",
+        "full filesystem",
+        "all files",
+        "every file",
 
-        "read all files",
-        "write all files",
-
-        "access every file",
-        "all local files",
-
-        "root filesystem",
         "root access",
+        "root filesystem",
 
         "unrestricted network",
         "unrestricted internet",
@@ -156,18 +143,19 @@ def check_permission(text):
         "all domains",
         "any domain",
 
-        "egress: all",
-        "network: all",
         "filesystem: all",
+        "filesystem:*",
 
-        "filesystem: *",
-        "network: *"
+        "network: all",
+        "network:*",
+
+        "egress: all",
+        "egress:*"
     ]
 
 
-    for p in patterns:
-
-        if p in text:
+    for b in bad:
+        if b in text:
             return True
 
 
@@ -176,39 +164,36 @@ def check_permission(text):
 
 
 
-# ==========================
-# PROVENANCE CHECK
-# ==========================
+# ---------------- PROVENANCE ----------------
 
-def check_provenance(meta,text):
+def unclear_provenance(meta,text):
 
-    # missing metadata
     if meta:
 
-        author = meta.get("author")
-        version = meta.get("version")
-        changelog = meta.get("changelog")
+        missing = 0
+
+        if "author" not in meta:
+            missing += 1
+
+        if "version" not in meta:
+            missing += 1
+
+        if "changelog" not in meta:
+            missing += 1
 
 
-        if not author and not version and not changelog:
+        if missing == 3:
             return True
 
 
-    # silent metadata rewrite
-    patterns = [
-
-        "silently update version",
-        "rewrite version without review",
-        "change version without review",
-        "update metadata without notifying"
-
-    ]
-
-
-    for p in patterns:
-
-        if p in text:
-            return True
+    if (
+        "silently update version" in text
+        or
+        "rewrite version silently" in text
+        or
+        "change metadata without review" in text
+    ):
+        return True
 
 
     return False
@@ -216,47 +201,35 @@ def check_provenance(meta,text):
 
 
 
-# ==========================
-# API ENDPOINT
-# ==========================
-
 @app.post("/")
-def scan(req: SkillRequest):
+def scan(req:SkillRequest):
 
-    skill = req.skill
+    skill=req.skill
 
-    text = skill.lower()
+    text=skill.lower()
 
-    categories = []
-
-
-    meta = parse_frontmatter(skill)
+    meta=get_frontmatter(skill)
 
 
-    if check_secret(skill):
-        categories.append(
-            "hardcoded_secret"
-        )
+    result=[]
 
 
-    if check_injection(text):
-        categories.append(
-            "prompt_injection"
-        )
+    if hardcoded_secret(skill):
+        result.append("hardcoded_secret")
 
 
-    if check_permission(text):
-        categories.append(
-            "excessive_permissions"
-        )
+    if prompt_injection(text):
+        result.append("prompt_injection")
 
 
-    if check_provenance(meta,text):
-        categories.append(
-            "unclear_provenance"
-        )
+    if excessive_permissions(text):
+        result.append("excessive_permissions")
+
+
+    if unclear_provenance(meta,text):
+        result.append("unclear_provenance")
 
 
     return {
-        "categories": categories
+        "categories":result
     }
